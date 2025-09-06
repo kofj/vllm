@@ -306,6 +306,8 @@ class EngineArgs:
     # number of P/D disaggregation (or other disaggregation) workers
     pipeline_parallel_size: int = ParallelConfig.pipeline_parallel_size
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
+    decode_context_parallel_size: int = \
+        ParallelConfig.decode_context_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     data_parallel_rank: Optional[int] = None
     data_parallel_start_rank: Optional[int] = None
@@ -364,6 +366,7 @@ class EngineArgs:
     disable_mm_preprocessor_cache: bool = False  # DEPRECATED
     mm_processor_cache_gb: float = MultiModalConfig.mm_processor_cache_gb
     mm_encoder_tp_mode: MMEncoderTPMode = MultiModalConfig.mm_encoder_tp_mode
+    io_processor_plugin: Optional[str] = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     # LoRA fields
     enable_lora: bool = False
@@ -577,6 +580,8 @@ class EngineArgs:
                                  **model_kwargs["override_attention_dtype"])
         model_group.add_argument("--logits-processors",
                                  **model_kwargs["logits_processors"])
+        model_group.add_argument("--io-processor-plugin",
+                                 **model_kwargs["io_processor_plugin"])
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -633,6 +638,9 @@ class EngineArgs:
             **parallel_kwargs["pipeline_parallel_size"])
         parallel_group.add_argument("--tensor-parallel-size", "-tp",
                                     **parallel_kwargs["tensor_parallel_size"])
+        parallel_group.add_argument(
+            "--decode-context-parallel-size", "-dcp",
+            **parallel_kwargs["decode_context_parallel_size"])
         parallel_group.add_argument("--data-parallel-size", "-dp",
                                     **parallel_kwargs["data_parallel_size"])
         parallel_group.add_argument(
@@ -993,6 +1001,7 @@ class EngineArgs:
             model_impl=self.model_impl,
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
+            io_processor_plugin=self.io_processor_plugin,
         )
 
     def validate_tensorizer_args(self):
@@ -1152,6 +1161,17 @@ class EngineArgs:
             # global layers in interleaved sliding window models.
             sliding_window = model_config.get_sliding_window()
 
+        # Note(hc): In the current implementation of decode context
+        # parallel(DCP), tp_size needs to be divisible by dcp_size,
+        # because the world size does not change by dcp, it simply
+        # reuse the GPUs of TP group, and split one TP group into
+        # tp_size//dcp_size DCP groups.
+        assert self.tensor_parallel_size % self.decode_context_parallel_size \
+            == 0, (
+            f"tp_size={self.tensor_parallel_size} must be divisible by"
+            f"dcp_size={self.decode_context_parallel_size}."
+        )
+
         cache_config = CacheConfig(
             block_size=self.block_size,
             gpu_memory_utilization=self.gpu_memory_utilization,
@@ -1302,6 +1322,7 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            decode_context_parallel_size=self.decode_context_parallel_size,
         )
 
         speculative_config = self.create_speculative_config(
@@ -1432,17 +1453,6 @@ class EngineArgs:
                                recommend_to_remove=True)
             return False
 
-        # Triton v3.3 has f16 conversion regression issue on Turing and Volta,
-        # which broke fp16 inference
-        # see: https://github.com/triton-lang/triton/issues/6698
-        if (current_platform.is_cuda()
-                and not current_platform.has_device_capability(80)
-                and model_config.dtype == torch.float16):
-            _raise_or_fallback(
-                feature_name="Compute Capability < 8.0 with FP16",
-                recommend_to_remove=False)
-            return False
-
         if self.kv_cache_dtype != "auto":
             supported = current_platform.is_kv_cache_dtype_supported(
                 self.kv_cache_dtype, model_config)
@@ -1495,6 +1505,8 @@ class EngineArgs:
             "TRITON_MLA",
             "CUTLASS_MLA",
             "FLASHMLA",
+            "FLASHMLA_VLLM_V1",
+            "FLASH_ATTN_MLA",
             "FLASHINFER",
             "FLASHINFER_VLLM_V1",
             "ROCM_AITER_MLA",

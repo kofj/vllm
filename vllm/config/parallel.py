@@ -87,7 +87,7 @@ class ParallelConfig:
     data_parallel_external_lb: bool = False
     """Whether to use "external" DP LB mode. Applies only to online serving
     and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    wide-EP setup in Kuberentes. Set implicitly when --data-parallel-rank
+    wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
     is provided explicitly to vllm serve."""
     data_parallel_hybrid_lb: bool = False
     """Whether to use "hybrid" DP LB mode. Applies only to online serving
@@ -169,6 +169,11 @@ class ParallelConfig:
     """List of open port auto-queried for data parallel messaging.
     Set to be private as it's not intended to be configured by users.
     """
+
+    decode_context_parallel_size: int = 1
+    """Number of decode context parallel groups, because the world size does
+    not change by dcp, it simply reuse the GPUs of TP group, and tp_size
+    needs to be divisible by dcp_size."""
 
     @property
     def world_size_across_dp(self) -> int:
