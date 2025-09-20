@@ -560,8 +560,8 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
-    def _create_image_input(self,
-                            **kwargs: object) -> Optional[Blip2ImageInputs]:
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[Blip2ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
 
@@ -678,10 +678,9 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP,
         Args:
             input_ids: Flattened (concatenated) input_ids corresponding to a
                 batch.
-            pixel_values: The pixels in each input image.
         
         Info:
-            [Blip2ImageInputs][]
+            [`Blip2ImageInputs`][vllm.model_executor.models.blip2.Blip2ImageInputs]
         """
 
         if intermediate_tensors is not None:

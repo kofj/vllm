@@ -24,7 +24,7 @@ import torch.nn.functional as F
 from torch import nn
 from transformers import Gemma3TextConfig
 
-from vllm.attention import Attention
+from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -44,6 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from ...attention.layers.encoder_only_attention import EncoderOnlyAttention
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, extract_layer_index,
                     is_pp_missing_parameter,
@@ -169,16 +170,24 @@ class Gemma3Attention(nn.Module):
             rope_scaling=self.rope_scaling,
         )
 
-        # Initialize the attention.
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              logits_soft_cap=attn_logits_soft_cap,
-                              per_layer_sliding_window=sliding_window,
-                              prefix=f"{prefix}.attn")
+        if getattr(config, "is_causal", True):
+            attn_type = AttentionType.DECODER
+        else:
+            attn_type = AttentionType.ENCODER_ONLY
+
+        attn_cls = (EncoderOnlyAttention
+                    if attn_type == AttentionType.ENCODER_ONLY else Attention)
+
+        self.attn = attn_cls(self.num_heads,
+                             self.head_dim,
+                             self.scaling,
+                             num_kv_heads=self.num_kv_heads,
+                             cache_config=cache_config,
+                             quant_config=quant_config,
+                             attn_type=attn_type,
+                             logits_soft_cap=attn_logits_soft_cap,
+                             per_layer_sliding_window=sliding_window,
+                             prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -437,6 +446,22 @@ class Gemma3Model(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
+
+            # Check if this is a scale parameter that needs remapping first
+            if name.endswith(
+                (".k_scale", ".v_scale", ".q_scale", ".prob_scale")):
+                # Try to remap the scale name first
+                remapped_name = maybe_remap_kv_scale_name(name, params_dict)
+                if remapped_name is not None and remapped_name in params_dict:
+                    # Successfully remapped, use the remapped name
+                    param = params_dict[remapped_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(remapped_name)
+                    continue
+                # If remapping failed, continue with normal processing
+
             for (param_name, shard_name, shard_id) in stacked_params_mapping:
                 if shard_name not in name:
                     continue

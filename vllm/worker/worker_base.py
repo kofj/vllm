@@ -5,7 +5,8 @@ import dataclasses
 import os
 import time
 from abc import abstractmethod
-from typing import Any, Dict, List, Optional, Set, Tuple, Type, Union
+from typing import (Any, Callable, Dict, List, Optional, Set, Tuple, Type,
+                    TypeVar, Union)
 
 import cloudpickle
 import torch
@@ -27,6 +28,8 @@ from vllm.worker.model_runner_base import (BroadcastableModelInput,
                                            ModelRunnerInputBase)
 
 logger = init_logger(__name__)
+
+_R = TypeVar("_R")
 
 
 @warn_for_unimplemented_methods
@@ -69,6 +72,10 @@ class WorkerBase:
 
     def get_model(self) -> nn.Module:
         raise NotImplementedError
+
+    def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
+        """Apply a function on the model inside this worker."""
+        return fn(self.get_model())
 
     def load_model(self) -> None:
         """Load model onto target device."""
@@ -128,6 +135,10 @@ class WorkerBase:
     def vocab_size(self) -> int:
         """Get vocabulary size from model configuration."""
         return self.model_config.get_vocab_size()
+
+    def shutdown(self) -> None:
+        """Clean up resources held by the worker."""
+        return
 
 
 class DelegateWorkerBase(WorkerBase):
@@ -518,6 +529,10 @@ class WorkerWrapperBase:
                 # note: lazy import to avoid importing torch before initializing
                 from vllm.utils import init_cached_hf_modules
                 init_cached_hf_modules()
+
+    def shutdown(self) -> None:
+        if self.worker is not None:
+            self.worker.shutdown()
 
     def adjust_rank(self, rank_mapping: Dict[int, int]) -> None:
         """
